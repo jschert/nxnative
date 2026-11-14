@@ -1,0 +1,1270 @@
+From 60c5c3034f3adae083c486fb8c34cabd5b148231 Mon Sep 17 00:00:00 2001
+From: seedds <seedds@gmail.com>
+Date: Sat, 14 Nov 2026 12:35:24 -0500
+Subject: [PATCH] mac/menus: adapt James Sturges's menu and backup prerequisite
+
+Adapt the in-game menu and backup/restore work from James Sturges's PR #921
+(head f2401b4be6bed3ab231117bd5117d3f65a5b7d6e) to the prepared upstream
+base 224ecb186960febfc361071bc1c3f181e20dbefb.
+
+This is the dependency recorded for review of the native save importer,
+not a replacement for PR #921 or new importer work. Keep it separate when
+choosing the eventual upstream order. Checks on the combined feature are
+recorded in the review evidence; this commit is not a new gameplay claim
+for the menu adaptation alone.
+
+Co-authored-by: James Sturges <james@sturges.dev>
+---
+ dm/games/010093801237C000/README.md |   2 +
+ dm/host/Makefile                    |   4 +-
+ dm/host/front_mac.m                 |  28 ++-
+ dm/host/hle.h                       |   2 +
+ dm/host/hle_audio.c                 |  12 +-
+ dm/host/menus_mac.h                 |   5 +
+ dm/host/menus_mac.m                 | 280 ++++++++++++++++++++++++++++
+ dm/host/save_backup_mac.c           |  94 ++++++++++
+ dm/host/save_backup_mac.h           |   6 +
+ dm/host/tests/Makefile              |  11 ++
+ dm/host/tests/t_audio.c             |  17 ++
+ dm/host/tests/t_mac_backup.c        |  53 ++++++
+ dm/host/tests/t_mac_menus.m         | 118 ++++++++++++
+ dm/mac/Launcher.swift               |   2 +
+ dm/mac/launcher.c                   |  42 ++++-
+ dm/mac/pack_app.py                  |   8 +-
+ dm/tools/impact_map.tsv             |   3 +
+ dm/tools/tests/test_nsp_mac_app.py  |  93 +++++++--
+ docs/agents/symptoms.md             |   1 +
+ docs/env_switches.tsv               |   1 +
+ docs/frontends.md                   |   2 +
+ docs/playing.md                     |  17 ++
+ docs/reference/packing.md           |   9 +
+ docs/settings.md                    |   2 +
+ 24 files changed, 779 insertions(+), 33 deletions(-)
+ create mode 100644 dm/host/menus_mac.h
+ create mode 100644 dm/host/menus_mac.m
+ create mode 100644 dm/host/save_backup_mac.c
+ create mode 100644 dm/host/save_backup_mac.h
+ create mode 100644 dm/host/tests/t_mac_backup.c
+ create mode 100644 dm/host/tests/t_mac_menus.m
+
+diff --git a/dm/games/010093801237C000/README.md b/dm/games/010093801237C000/README.md
+index 3d5d1748..2e9cde3a 100644
+--- a/dm/games/010093801237C000/README.md
++++ b/dm/games/010093801237C000/README.md
+@@ -91,6 +91,8 @@ After integration with main's pipeline archive and profiling changes (`7753b7b`)
+ 
+ General host changes first needed here; each applies to every game:
+ 
++- **Mac in-game menus, reported in [PR #921](https://github.com/seedds/nxnative/pull/921):** its author tested the opening/title of update 2.1.0 on a MacBook Air M4 with isolated saves and cloud sync off, including console-mode changes, native menu/window actions, volume/mute and screenshots. Xcode 27.0 / Metal 32023.921 required `--allow-other-metal`; this establishes that reported UI route, not supported-toolchain rendering/performance or a new gameplay check here. The general integration is described in [In-game menus use the launcher's choices and committed saves](../../../docs/reference/packing.md#in-game-menus-use-the-launchers-choices-and-committed-saves).
++
+ - **Switch 2 controllers over Bluetooth LE:** [Switch 2 controllers over Bluetooth LE](../../../docs/reference/services.md#switch-2-controllers-over-bluetooth-le): a left and a right Joy-Con 2 woke toward the Mac and played as one pair, a Joy-Con held in Sync during the game paired and kept playing, and the Home hold opened the quit prompt.
+ - **Synchronization review gameplay validation:** [Final gameplay validation](#final-gameplay-validation-2026-10-26-current) records the #158/#213 comparison and its limits; the general fixes and synthetic regressions are linked under the earlier smoke routes.
+ - **Patch areas before the module base** for modules with a giant bss (negative `PATCH_OFF`, `FILE_IMAGE_LEN`, `IMAGE_SIZE`): [Patch area before the module base for a large bss](../../../docs/reference/rewriter.md#patch-area-before-the-module-base-for-a-large-bss).
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index 461132fb..320f0874 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -19,7 +19,7 @@ include ../mac/min_os.mk
+ # hle_bigstack.c's inline-assembly entry apart from its return path (SIGBUS in dm_bigstack_enter on Breath of the Wild, PR #556)
+ CFLAGS=-O2 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+ # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
+-SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
++SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c save_backup_mac.c menus_mac.m memstat.m haptics_apple.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m web_apple.m entry.S
+ # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
+ # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex, dm/gfx/vk and dm/gfx/gl are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
+ GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m ../gfx/gl/*.m))
+@@ -79,7 +79,7 @@ endif
+ .PHONY: FORCE
+ FORCE:
+ # Makefile: a change to CFLAGS (or the compile line) rebuilds the host
+-dmhost: Makefile $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h pad_switch2_apple.h switch2_proto.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h ctrl_prompt.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
++dmhost: Makefile $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h romfs_image.h save_sync.h save_backup_mac.h menus_mac.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h pad_switch2_apple.h switch2_proto.h motion_fusion.h motion_apple.h motion_pro.h motion_pro_mac.h pad_apple.h pad_hid.h pad_hid_mac.h home_quit.h home_quit_mac.h ctrl_prompt.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB) $(DAV1D_LIB) $(MSL_H)
+ 	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(MSL_H)) -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I$(DAV1D)/include -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(DAV1D_LIB) -framework Cocoa -framework WebKit -framework UserNotifications -framework QuartzCore -framework Metal -framework MetalFX -framework GameController -framework CoreBluetooth -framework IOBluetooth -framework CoreHaptics -framework IOKit -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+ clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx and dav1d builds; dmhost_* and *.dSYM beside them, as in .gitignore)
+ 	rm -rf gen dmhost dmhost_* *.dSYM
+diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
+index 278bf272..73566401 100644
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -16,6 +16,7 @@
+ #include "dm.h"
+ #include "dm_input.h"
+ #include "front.h"
++#include "menus_mac.h"
+ #include "hle.h"
+ #include "pad_slots.h"
+ #include "haptics_apple.h"
+@@ -822,7 +823,7 @@ - (void)menuNeedsUpdate:(NSMenu *)menu {
+     sh.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;   // ⌘⇧C (the plain "c" already maps ZR)
+     NSMenuItem *ms = [menu addItemWithTitle:@"Cheats On" action:@selector(toggleMaster:) keyEquivalent:@""];
+     ms.target = self; ms.state = dm_cheats_master() ? NSControlStateValueOn : NSControlStateValueOff;
+-    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (safe mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
++    if (dm_cheats_safe()) [menu addItemWithTitle:@"Restore Saved Cheats (Safe Mode)" action:@selector(restoreSafe:) keyEquivalent:@""].target = self;
+     [menu addItem:NSMenuItem.separatorItem];
+     const char *sec = "";
+     for (int i = 0, n = dm_cheats_ncheats(); i < n; i++) {
+@@ -846,10 +847,10 @@ - (void)menuNeedsUpdate:(NSMenu *)menu {
+     if (!dm_cheats_found())
+         [menu addItemWithTitle:[NSString stringWithFormat:@"No cheats for %@", build_label(dm_cheats_build(), dm_cheats_version())] action:nil keyEquivalent:@""].enabled = NO;
+     [menu addItem:[NSMenuItem separatorItem]];
+-    NSMenuItem *re = [menu addItemWithTitle:@"Reload cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
++    NSMenuItem *re = [menu addItemWithTitle:@"Reload Cheats" action:@selector(reloadCheats:) keyEquivalent:@"r"];
+     re.target = self;
+     const char *dir = dm_cheats_dir_path();
+-    NSMenuItem *op = [menu addItemWithTitle:@"Open cheats folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
++    NSMenuItem *op = [menu addItemWithTitle:@"Open Cheats Folder" action:dir && *dir ? @selector(openCheatsFolder:) : nil keyEquivalent:@""];
+     op.target = self;
+     op.enabled = dir && *dir != 0;
+ }
+@@ -1515,11 +1516,13 @@ void front_run(void (*guest)(void)) {
+     @autoreleasepool {
+         [NSApplication sharedApplication];
+         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
++        NSWindow.allowsAutomaticWindowTabbing = NO;   // a game window never joins a macOS tab group (the menu bar and merging are for documents)
+         NSRect r = NSMakeRect(0, 0, 1280, 720);
+         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
+                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+                                                       backing:NSBackingStoreBuffered defer:NO];
+         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
++        win.tabbingMode = NSWindowTabbingModeDisallowed;
+         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
+         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
+         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+@@ -1548,7 +1551,14 @@ void front_run(void (*guest)(void)) {
+         // Main menu: AppKit runs ⌘ shortcuts only through menu items, so ⌘Q quits and ⌃⌘F toggles fullscreen from here (AppKit shows the item as Globe-F and keeps ⌃⌘F as a hidden twin)
+         NSMenu *bar = [NSMenu new], *app = [NSMenu new], *wm = [[NSMenu alloc] initWithTitle:@"Window"];
+         [[bar addItemWithTitle:@"" action:nil keyEquivalent:@""] setSubmenu:app];
++        [app addItemWithTitle:[@"About " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
++        [app addItem:NSMenuItem.separatorItem];
++        [app addItemWithTitle:[@"Hide " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(hide:) keyEquivalent:@"h"];
++        [app addItemWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"].keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
++        [app addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
++        [app addItem:NSMenuItem.separatorItem];
+         [app addItemWithTitle:[@"Quit " stringByAppendingString:@(DM_GAME_NAME)] action:@selector(terminate:) keyEquivalent:@"q"];
++        mac_menus_install(win, bar);   // File / Game / Audio / View: the native in-game menus (menus_mac.m), added beside the ones below
+         // Cheats (hle_cheats.c): the rows rebuild on every open through the delegate, the same rows the file reload changes
+         g_cheats_menu = [DmCheatsMenuDelegate new];
+         NSMenu *cm = [[NSMenu alloc] initWithTitle:@"Cheats"];
+@@ -1562,8 +1572,14 @@ void front_run(void (*guest)(void)) {
+         if (getenv("DM_CHEATS_WINDOW") && atoi(getenv("DM_CHEATS_WINDOW")))   // the Cheats panel open from the start (beside the game, not key)
+             dispatch_async(dispatch_get_main_queue(), ^{ [g_cheats_menu showPanel:nil]; });
+         [[bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""] setSubmenu:wm];
++        [wm addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
++        [wm addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
++        [wm addItem:NSMenuItem.separatorItem];
+         [wm addItemWithTitle:@"Enter Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"].keyEquivalentModifierMask = NSEventModifierFlagControl | NSEventModifierFlagCommand;
++        [wm addItem:NSMenuItem.separatorItem];
++        [wm addItemWithTitle:@"Bring All to Front" action:@selector(arrangeInFront:) keyEquivalent:@""];
+         NSApp.mainMenu = bar;
++        NSApp.windowsMenu = wm;
+         const char *fs = getenv("DM_FULLSCREEN");   // 1 (or any value but 0): start in fullscreen; 0, the settings window's Window, or unset: a window
+         if (fs && strcmp(fs, "0")) {
+             // A game opened from a fullscreen app starts while macOS leaves that Space. Wait for activation and for the window to reach the active Space before asking for fullscreen
+@@ -1600,6 +1616,7 @@ void front_run(void (*guest)(void)) {
+         pads_start();
+         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
+             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
++            if (e.type == NSEventTypeKeyDown && e.keyCode == 111 && [NSApp.mainMenu performKeyEquivalent:e]) return nil;   // F12 screenshot (the File menu's hidden twin), before the game swallows function keys
+             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed
+             if (e.type == NSEventTypeKeyDown && fn_shortcut(e)) return e;   // fn (Globe) + a letter is the system's (fn+F full screen, GitHub issue #873), not the game's F
+             if (!e.isARepeat) on_key(e, e.type == NSEventTypeKeyDown);
+@@ -1619,11 +1636,12 @@ void front_run(void (*guest)(void)) {
+         // DM_FOCUS_KEEP=1 (scripts/regress.py): the game stays in focus while its window is up, whichever app is active. Tears of the Kingdom stops presenting out of focus, so
+         // another app taking the key window during an unattended run read as a hang (no frame after the last focus change)
+         static int keep = -1; if (keep < 0) keep = getenv("DM_FOCUS_KEEP") && atoi(getenv("DM_FOCUS_KEEP"));
+-        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
+-        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); dm_focus_set(1); }];
++        [nc addObserverForName:NSWindowDidResignKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); mac_menus_focus(0); if (!win.miniaturized && !g_text_box && !keep) dm_focus_set(2); }];
++        [nc addObserverForName:NSWindowDidBecomeKeyNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_resume(); mac_menus_focus(1); dm_focus_set(1); }];
+         [nc addObserverForName:NSWindowDidMiniaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; input_release(); dm_focus_set(3); dm_audio_suspend(1); dm_gfx_suspend(1); }];
+         [nc addObserverForName:NSWindowDidDeminiaturizeNotification object:win queue:nil usingBlock:^(NSNotification *n) { (void)n; dm_gfx_suspend(0); dm_audio_suspend(0); dm_focus_set(2); }];
+         display_awake(win.isKeyWindow);   // the window may have become key (makeKeyAndOrderFront above) before these observers were installed
++        mac_menus_focus(win.isKeyWindow);   // the Audio menu's mute-when-unfocused starts from the window's actual focus
+         // Guest thread: 64 MiB stack (the Switch main thread stack is specified by npdm; the host gives plenty)
+         static guest_arg ga; ga.fn = guest;
+         pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);
+diff --git a/dm/host/hle.h b/dm/host/hle.h
+index 138f453e..f05e7f0e 100644
+--- a/dm/host/hle.h
++++ b/dm/host/hle.h
+@@ -69,5 +69,7 @@ static inline void dm_applet_leave_(const char *const *name) { (void)name; dm_ap
+ extern uint8_t *dm_fps_state;   // frame step state page (loader.c install_fps_state): +0 float target fps, +4 movie flag (dm_movie_playing, written by the host at each present: Tears of the Kingdom's step stub caps its first, undecided steps by it), +0x10 float render scale, +0x18 double game seconds stepped; NULL when the build has none
+ int dm_movie_playing(void);   // hle_movie.c: a video decoder of the SDK's movie library handed out a picture in the last half second (the frame step then holds 30 fps)
+ void dm_audio_suspend(int on);
++void dm_audio_mute(int on);   // silence device output while preserving callback pacing and background/interruption state
++void dm_audio_volume(int percent);   // session output gain, 0..100, independent of the game's own volume and mute
+ uint64_t dm_audio_render_calls(void);   // Cumulative sound card callback count (the silent sink is not counted)
+ void dm_audio_reset(void);   // iOS media services reset: recreate the AudioUnits (hle_audio.c)
+diff --git a/dm/host/hle_audio.c b/dm/host/hle_audio.c
+index 40a3b767..f71c1cfe 100644
+--- a/dm/host/hle_audio.c
++++ b/dm/host/hle_audio.c
+@@ -12,6 +12,11 @@
+ enum { FMT_PCM16 = 2, STATE_STARTED = 0, STATE_STOPPED = 1, RATE = 48000 };
+ enum { BK_NONE, BK_AU, BK_NULL };   // what is consuming an output's queue right now (aout.backend)
+ enum { AU_IDLE, AU_STARTING, AU_CANCELED, AU_WAIT_CALLBACK };
++// The Mac Audio menu's session controls (menus_mac.m): written from the main thread, read by the device callback only, so relaxed atomics need no lock
++static _Atomic int g_output_muted;
++static _Atomic int g_output_percent = 100;
++void dm_audio_mute(int on) { atomic_store_explicit(&g_output_muted, !!on, memory_order_relaxed); }
++void dm_audio_volume(int percent) { atomic_store_explicit(&g_output_percent, percent < 0 ? 0 : percent > 100 ? 100 : percent, memory_order_relaxed); }
+ 
+ typedef struct { void *ptr; uint64_t cap, size; } gbuf;     // The first 24 bytes written into the guest AudioOutBuffer
+ #define QMAX 64
+@@ -172,7 +177,12 @@ static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioT
+         memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
+     } else {
+         pull_device(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
+-        if (a->mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
++        int percent = a->mute || atomic_load_explicit(&g_output_muted, memory_order_relaxed) ? 0 : atomic_load_explicit(&g_output_percent, memory_order_relaxed);
++        if (!percent) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize);
++        else if (percent < 100) {   // the session gain, after the guest's own volume (pull): 16-bit scaling in int32 cannot clip
++            int16_t *samples = bl->mBuffers[0].mData;
++            for (size_t i = 0; i < bl->mBuffers[0].mDataByteSize / sizeof *samples; i++) samples[i] = (int16_t)((int32_t)samples[i] * percent / 100);
++        }
+     }
+     return noErr;
+ }
+diff --git a/dm/host/menus_mac.h b/dm/host/menus_mac.h
+new file mode 100644
+index 00000000..2052a3c3
+--- /dev/null
++++ b/dm/host/menus_mac.h
+@@ -0,0 +1,5 @@
++// Add the game's File, Game, Audio and View menus without replacing existing menus.
++#pragma once
++#import <Cocoa/Cocoa.h>
++void mac_menus_install(NSWindow *window, NSMenu *bar);
++void mac_menus_focus(int active);
+diff --git a/dm/host/menus_mac.m b/dm/host/menus_mac.m
+new file mode 100644
+index 00000000..3d62ad89
+--- /dev/null
++++ b/dm/host/menus_mac.m
+@@ -0,0 +1,280 @@
++// In-game actions extracted from #104. Launch settings share the launcher's model and preferences.
++#import "menus_mac.h"
++#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
++#include "hle.h"
++#include "save_backup_mac.h"
++#include "save_sync.h"
++#include <fcntl.h>
++#include <errno.h>
++#include <limits.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <ctype.h>
++#include <math.h>
++
++static int g_muted, g_mute_unfocused, g_active = 1;
++void mac_menus_focus(int active) { g_active = active; dm_audio_mute(g_muted || (g_mute_unfocused && !g_active)); }
++
++static NSString *save_folder(void) { const char *s = getenv("DM_SAVE"); return s && *s ? [NSURL fileURLWithPath:@(s) isDirectory:YES].path : nil; }
++static NSString *log_file(void) {
++    char p[PATH_MAX]; struct stat st;
++    return !fstat(STDERR_FILENO, &st) && S_ISREG(st.st_mode) && !fcntl(STDERR_FILENO, F_GETPATH, p) ? @(p) : nil;
++}
++static void message(NSString *title, NSString *detail) {
++    NSAlert *a = [NSAlert new]; a.messageText = title; a.informativeText = detail; [a runModal];
++}
++
++@interface DmMacMenus : NSObject <NSMenuItemValidation>
++@property (nonatomic, strong) NSWindow *window;
++@property (nonatomic, copy) NSDictionary<NSString *, NSDictionary *> *settings;
++@property (nonatomic, copy) NSString *domain;
++@property (nonatomic) BOOL busy;
++@property (nonatomic) NSInteger volume;
++@property (nonatomic, strong) NSTextField *volumeValue;
++@end
++@implementation DmMacMenus
++- (BOOL)fixed:(NSString *)env {
++    if (!env) return YES;
++    NSString *keys = [NSString stringWithFormat:@"%s %s", getenv("DM_ENV_LAUNCH_KEYS") ?: "", getenv("DM_ENV_FILE_KEYS") ?: ""];
++    if ([[keys componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet] containsObject:env]) return YES;
++    // A direct CLI host has no shared app settings; allow a session change only when it has no explicit override.
++    return getenv("DM_ENV_LAUNCH_KEYS") == NULL && getenv(env.UTF8String) != NULL;
++}
++- (BOOL)ignoringSaved {
++    const char *off = getenv("DM_SAVED_CHOICES"); return off && !strcmp(off, "0");
++}
++- (BOOL)accepts:(NSString *)value setting:(NSString *)env {
++    if (!env || !value) return NO;
++    NSDictionary *s = self.settings[env];
++    if ([s[@"kind"] isEqual:@"choice"]) { for (NSArray *pair in s[@"options"]) if ([pair.firstObject isEqual:value]) return YES; return NO; }
++    if (![s[@"kind"] isEqual:@"range"]) return NO;
++    const char *text = value.UTF8String; if (!text || !*text || isspace((unsigned char)*text) || strpbrk(text, "xX")) return NO;
++    char *end; double n = strtod(text, &end);
++    return !*end && isfinite(n) && s[@"min"] && s[@"max"] && n >= [s[@"min"] doubleValue] && n <= [s[@"max"] doubleValue];
++}
++- (BOOL)equal:(NSString *)a to:(NSString *)b setting:(NSString *)env {
++    return [self.settings[env][@"kind"] isEqual:@"range"] ? fabs(a.doubleValue - b.doubleValue) < 1e-6 : [a isEqual:b];
++}
++- (NSString *)current:(NSString *)env {
++    if (!env) return nil;
++    if ([env isEqual:@"DM_OPMODE"]) return dm_opmode() ? @"1" : @"0";
++    if (dm_fps_state) {
++        uint32_t bits = __atomic_load_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), __ATOMIC_RELAXED);
++        float n; memcpy(&n, &bits, sizeof n); return [NSString stringWithFormat:@"%.6g", n];
++    }
++    const char *e = getenv(env.UTF8String);
++    return e ? @(e) : self.settings[env][@"default"];
++}
++- (BOOL)canChange:(NSString *)env value:(NSString *)value {
++    if (![self accepts:value setting:env] || [self fixed:env]) return NO;
++    return [env isEqual:@"DM_OPMODE"] || (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && dm_fps_state);
++}
++- (BOOL)validateMenuItem:(NSMenuItem *)item {
++    SEL a = item.action;
++    if (a == @selector(chooseSetting:)) {
++        NSString *env = item.representedObject[@"env"], *value = item.representedObject[@"value"];
++        if (!env || !value) return NO;
++        item.state = [self equal:[self current:env] to:value setting:env] ? NSControlStateValueOn : NSControlStateValueOff;
++        return [self canChange:env value:value];
++    }
++    if (a == @selector(mute:)) item.state = g_muted ? NSControlStateValueOn : NSControlStateValueOff;
++    if (a == @selector(muteUnfocused:)) item.state = g_mute_unfocused ? NSControlStateValueOn : NSControlStateValueOff;
++    if (a == @selector(resize:)) return !(self.window.styleMask & NSWindowStyleMaskFullScreen);
++    if (a == @selector(openSave:)) return save_folder() != nil;
++    if (a == @selector(openLog:)) return log_file() != nil;
++    if (a == @selector(exportSave:)) return !self.busy && save_folder() != nil;
++    if (a == @selector(restoreSave:)) return !self.busy && save_folder() != nil && getenv("DM_MAC_RESTORE_DIR") != NULL;
++    return YES;
++}
++- (void)chooseSetting:(NSMenuItem *)item {
++    NSString *env = item.representedObject[@"env"], *value = item.representedObject[@"value"];
++    if (![self canChange:env value:value]) return;
++    if (self.domain && !self.ignoringSaved) {
++        CFStringRef domain = (__bridge CFStringRef)self.domain;
++        NSString *key = [@"launcher." stringByAppendingString:env];
++        CFPreferencesSetAppValue((__bridge CFStringRef)key, [self equal:value to:self.settings[env][@"default"] setting:env] ? NULL : (__bridge CFStringRef)value, domain);
++        if (!CFPreferencesAppSynchronize(domain)) { message(@"Setting was not saved", @"The app could not write its saved choices. Try again."); return; }
++    }
++    if ([env isEqual:@"DM_OPMODE"]) dm_set_opmode(value.intValue);
++    else {
++        float n = value.floatValue; uint32_t bits; memcpy(&bits, &n, sizeof bits);
++        __atomic_store_n((uint32_t *)(dm_fps_state + ([env isEqual:@"DM_RENDER_SCALE"] ? 0x10 : 0)), bits, __ATOMIC_RELAXED);
++    }
++}
++- (void)chooseVolume:(NSSlider *)slider {
++    self.volume = lround(slider.doubleValue);
++    self.volumeValue.stringValue = [NSString stringWithFormat:@"%ld%%", (long)self.volume];
++    dm_audio_volume((int)self.volume);
++}
++- (void)mute:(id)sender { (void)sender; g_muted = !g_muted; mac_menus_focus(g_active); }
++- (void)muteUnfocused:(id)sender { (void)sender; g_mute_unfocused = !g_mute_unfocused; mac_menus_focus(g_active); }
++- (void)resize:(NSMenuItem *)item {
++    if (self.window.styleMask & NSWindowStyleMaskFullScreen) return;
++    CGFloat scale = self.window.backingScaleFactor;
++    NSSize size = NSMakeSize(1280 * item.tag / 100.0 / scale, 720 * item.tag / 100.0 / scale);
++    NSRect available = [self.window contentRectForFrameRect:self.window.screen.visibleFrame];
++    CGFloat fit = fmin(1, fmin(available.size.width / size.width, available.size.height / size.height));
++    size.width *= fit; size.height *= fit;
++    NSRect old = self.window.frame, content = [self.window contentRectForFrameRect:old];
++    content.size = size;
++    NSRect frame = [self.window frameRectForContentRect:content];
++    frame.origin = NSMakePoint(NSMidX(old) - frame.size.width / 2, NSMidY(old) - frame.size.height / 2);
++    frame = [self.window constrainFrameRect:frame toScreen:self.window.screen];
++    [self.window setFrame:frame display:YES animate:YES];
++}
++- (void)openSave:(id)sender { (void)sender; NSString *p = save_folder(); if (p) [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:p]]; }
++- (void)openLog:(id)sender { (void)sender; NSString *p = log_file(); if (p) [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[[NSURL fileURLWithPath:p]]]; }
++- (void)screenshot:(id)sender {
++    (void)sender;
++    NSURL *pictures = [NSFileManager.defaultManager URLForDirectory:NSPicturesDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:YES error:nil];
++    NSString *folder = [[pictures.path stringByAppendingPathComponent:@"nxnative"] stringByAppendingPathComponent:@DM_GAME_ID];
++    NSError *error;
++    if (!folder || ![NSFileManager.defaultManager createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:&error]) {
++        message(@"Screenshot could not be saved", error.localizedDescription ?: @"The Pictures folder is unavailable."); return;
++    }
++    NSString *p = [folder stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.png", NSUUID.UUID.UUIDString]];
++    dm_gfx_shot_at(1, p.fileSystemRepresentation);
++    LOG("front end: screenshot requested: %s", p.fileSystemRepresentation);
++}
++- (void)exportSave:(id)sender {
++    (void)sender; if (self.busy) return;
++    self.busy = YES;
++    NSSavePanel *panel = [NSSavePanel savePanel]; panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"dmsync"] ?: UTTypeData];
++    panel.nameFieldStringValue = [NSString stringWithFormat:@"%@-%@.dmsync", @DM_GAME_ID, NSUUID.UUID.UUIDString];
++    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
++        self.busy = NO;
++        if (result != NSModalResponseOK) return;
++        NSURL *destination = panel.URL;
++        NSString *save = save_folder(), *out = destination.path;
++        if (!save || !out || !destination) return;
++        // A backup must never replace a file in the active save or one of its sibling working/device directories.
++        NSString *root = save.stringByResolvingSymlinksInPath, *dest = out.stringByResolvingSymlinksInPath;
++        for (NSString *suffix in @[@"", @".work", @"_device", @"_device.work"]) {
++            NSString *folder = [root stringByAppendingString:suffix];
++            if ([dest isEqual:folder] || [dest hasPrefix:[folder stringByAppendingString:@"/"]]) {
++                message(@"Choose another backup folder", @"Keep exported backups outside the active save folders."); return;
++            }
++        }
++        self.busy = YES;
++        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
++            int r = mac_save_export(save.fileSystemRepresentation, DM_GAME_ID, out.fileSystemRepresentation), e = errno;
++            dispatch_async(dispatch_get_main_queue(), ^{
++                self.busy = NO;
++                if (r) message(@"Save backup failed", @(strerror(e)));
++                else [NSWorkspace.sharedWorkspace activateFileViewerSelectingURLs:@[destination]];
++            });
++        });
++    }];
++}
++- (void)restoreSave:(id)sender {
++    (void)sender; const char *dir = getenv("DM_MAC_RESTORE_DIR"); if (self.busy || !dir) return;
++    NSString *request = @(dir); self.busy = YES;
++    NSOpenPanel *panel = [NSOpenPanel openPanel]; panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"dmsync"] ?: UTTypeData]; panel.allowsMultipleSelection = NO;
++    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
++        if (result != NSModalResponseOK) { self.busy = NO; return; }
++        NSURL *source = panel.URL;
++        if (!source) { self.busy = NO; return; }
++        NSAlert *a = [NSAlert new]; a.messageText = @"Close the game and restore this backup?";
++        a.informativeText = @"Unsaved progress will be lost. Your current saved progress will be kept in a recovery folder. Start the game again after the restore finishes.";
++        [a addButtonWithTitle:@"Cancel"]; [a addButtonWithTitle:@"Close and Restore"];
++        [a beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse answer) {
++            if (answer != NSAlertSecondButtonReturn) { self.busy = NO; return; }
++            self.busy = YES;
++            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
++                NSString *copy = [request stringByAppendingPathComponent:@"backup.dmsync"];
++                NSError *error; ss_meta meta;
++                BOOL ok = [NSFileManager.defaultManager copyItemAtURL:source toURL:[NSURL fileURLWithPath:copy] error:&error];
++                if (ok) ok = !ss_read(copy.fileSystemRepresentation, NULL, &meta) && !strcasecmp(meta.title, DM_GAME_ID) && meta.files > 0;
++                if (ok) ok = [NSData.data writeToFile:[request stringByAppendingPathComponent:@"ready"] options:NSDataWritingAtomic error:&error];
++                if (!ok) [NSFileManager.defaultManager removeItemAtPath:copy error:nil];
++                dispatch_async(dispatch_get_main_queue(), ^{
++                    self.busy = NO;
++                    if (ok) [NSApp terminate:nil];   // launcher.c restores only after waitpid: no guest or cloud thread can write over it
++                    else message(@"Save backup could not be restored", error.localizedDescription ?: @"The backup is damaged, empty, or belongs to another game. Your current save was kept.");
++                });
++            });
++        }];
++    }];
++}
++@end
++
++static NSMenuItem *action(NSMenu *menu, NSString *title, SEL selector, NSString *key, DmMacMenus *target) {
++    NSMenuItem *item = [menu addItemWithTitle:title action:selector keyEquivalent:key]; item.target = target; return item;
++}
++static NSMenu *submenu(NSMenu *bar, NSString *title) {
++    NSMenu *m = [[NSMenu alloc] initWithTitle:title]; [[bar addItemWithTitle:title action:nil keyEquivalent:@""] setSubmenu:m]; return m;
++}
++// These are views of existing launch settings. Their names, choices, bounds and defaults come from the bundle.
++static void setting_menu(NSMenu *parent, NSString *env, DmMacMenus *menus) {
++    NSDictionary *s = menus.settings[env]; if (!s) return;
++    if (([env isEqual:@"DM_FPS_TARGET"] || [env isEqual:@"DM_RENDER_SCALE"]) && !dm_fps_state) return;
++    NSArray *options = s[@"options"];
++    if ([s[@"kind"] isEqual:@"range"]) {
++        double lo = [s[@"min"] doubleValue], hi = [s[@"max"] doubleValue], step = [s[@"step"] doubleValue];
++        if (!isfinite(lo) || !isfinite(hi) || !isfinite(step) || step <= 0 || hi < lo || (hi - lo) / step > 100) return;
++        NSMutableArray *values = [NSMutableArray new];
++        int count = (int)floor((hi - lo) / step + 1e-6);
++        for (int i = 0; i <= count; i++) {
++            double n = lo + i * step;
++            [values addObject:@[[NSString stringWithFormat:@"%.6g", n], [NSString stringWithFormat:@"%.0f%%", n * 100]]];
++        }
++        options = values;
++    }
++    if (![options isKindOfClass:NSArray.class] || !options.count) return;
++    NSString *title = [s[@"label"] localizedCapitalizedString];   // AppKit menu titles use title case; the shared form uses sentence case.
++    if (!title) return;
++    if ([menus fixed:env]) title = [title stringByAppendingString:@" (Launch Override)"];
++    NSMenu *m = submenu(parent, title);
++    for (NSArray *pair in options) {
++        NSMenuItem *item = action(m, pair[1], @selector(chooseSetting:), @"", menus);
++        item.representedObject = @{@"env": env, @"value": pair[0]};
++    }
++}
++void mac_menus_install(NSWindow *window, NSMenu *bar) {
++    static DmMacMenus *menus; menus = [DmMacMenus new]; menus.window = window; menus.volume = 100;
++    NSBundle *bundle = NSBundle.mainBundle; menus.domain = bundle.bundleIdentifier;
++    NSURL *url = [bundle URLForResource:@"launcher" withExtension:@"json" subdirectory:@"dm"];
++    NSData *data = url ? [NSData dataWithContentsOfURL:url] : nil;
++    id list = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
++    NSMutableDictionary *rows = [NSMutableDictionary new];
++    NSArray *shown = @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE"];
++    if ([list isKindOfClass:NSDictionary.class] && [list[@"settings"] isKindOfClass:NSArray.class])
++        for (id s in list[@"settings"]) if ([s isKindOfClass:NSDictionary.class]) {
++            NSString *env = s[@"env"]; if (env && [shown containsObject:env]) rows[env] = s;
++        }
++    // A bare development host has no bundle metadata or preferences; retain its session-only console mode action.
++    if (!menus.domain) rows[@"DM_OPMODE"] = @{@"kind": @"choice", @"label": @"Console mode", @"default": DM_GAME_OPMODE ? @"1" : @"0", @"options": @[@[@"1", @"Docked"], @[@"0", @"Handheld"]]};
++    menus.settings = rows;
++    NSMenu *file = submenu(bar, @"File");
++    action(file, @"Open Save Folder", @selector(openSave:), @"s", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
++    action(file, @"Reveal Log in Finder", @selector(openLog:), @"l", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
++    [file addItem:NSMenuItem.separatorItem];
++    action(file, @"Export Save Backup…", @selector(exportSave:), @"e", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
++    action(file, @"Restore Save from Backup…", @selector(restoreSave:), @"", menus);
++    // The screenshot queue belongs to NVN. Vulkan/GL apps do not carry a shader map.
++    if (getenv("DM_NVN_SHMAP")) {
++        [file addItem:NSMenuItem.separatorItem];
++        action(file, @"Take Screenshot", @selector(screenshot:), @"s", menus);
++        NSMenuItem *f12 = action(file, @"Take Screenshot", @selector(screenshot:), [NSString stringWithFormat:@"%C", (unichar)NSF12FunctionKey], menus);
++        f12.keyEquivalentModifierMask = 0; f12.hidden = YES; f12.allowsKeyEquivalentWhenHidden = YES;
++    }
++    NSMenu *game = submenu(bar, @"Game");
++    for (NSString *env in @[@"DM_OPMODE", @"DM_FPS_TARGET", @"DM_RENDER_SCALE"]) setting_menu(game, env, menus);
++    NSMenu *audio = submenu(bar, @"Audio");
++    action(audio, @"Mute Audio", @selector(mute:), @"m", menus).keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
++    action(audio, @"Mute When Unfocused", @selector(muteUnfocused:), @"", menus);
++    [audio addItem:NSMenuItem.separatorItem];
++    NSMenuItem *volume = [audio addItemWithTitle:@"Volume" action:nil keyEquivalent:@""];
++    NSView *controls = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 220, 56)];
++    NSTextField *label = [NSTextField labelWithString:@"Volume"];
++    label.frame = NSMakeRect(16, 32, 140, 17); [controls addSubview:label];
++    menus.volumeValue = [NSTextField labelWithString:@"100%"];
++    menus.volumeValue.frame = NSMakeRect(156, 32, 48, 17); menus.volumeValue.alignment = NSTextAlignmentRight;
++    [controls addSubview:menus.volumeValue];
++    NSSlider *slider = [NSSlider sliderWithValue:100 minValue:0 maxValue:100 target:menus action:@selector(chooseVolume:)];
++    slider.frame = NSMakeRect(16, 8, 188, 20); slider.continuous = YES; slider.accessibilityLabel = @"Game volume";
++    [controls addSubview:slider]; volume.view = controls;
++    NSMenu *view = submenu(bar, @"View"), *sizes = submenu(view, @"Window Scale");
++    int index = 0;
++    for (NSNumber *n in @[@100, @150, @200, @300]) action(sizes, [NSString stringWithFormat:@"%.1f×", n.doubleValue / 100], @selector(resize:), [NSString stringWithFormat:@"%d", ++index], menus).tag = n.integerValue;
++}
+diff --git a/dm/host/save_backup_mac.c b/dm/host/save_backup_mac.c
+new file mode 100644
+index 00000000..010bb61a
+--- /dev/null
++++ b/dm/host/save_backup_mac.c
+@@ -0,0 +1,94 @@
++#include "save_backup_mac.h"
++#include "save_sync.h"
++#include <copyfile.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <removefile.h>
++
++static void discard(const char *p) { removefile(p, NULL, REMOVEFILE_RECURSIVE); }
++static int path(char *out, const char *root, const char *suffix) {
++    if (snprintf(out, PATH_MAX, "%s%s", root, suffix) < PATH_MAX) return 0;
++    errno = ENAMETOOLONG; return -1;
++}
++// Resolve the same effective path as the host, including a trailing slash, before deriving `_device`.
++static int save_path(const char *save, char *out) {
++    if (!save || !*save) { errno = EINVAL; return -1; }
++    char p[PATH_MAX]; struct stat st;
++    if (path(p, save, "")) return -1;
++    size_t n = strlen(p); while (n > 1 && p[n - 1] == '/') p[--n] = 0;
++    // Resolving a symlink leaf would silently move the sibling `_device` save to another folder.
++    if (lstat(p, &st)) return -1;
++    if (!S_ISDIR(st.st_mode)) { errno = EINVAL; return -1; }
++    return realpath(save, out) ? 0 : -1;
++}
++static int snapshot(const char *save, const char *dir) {
++    for (int i = 0; i < 2; i++) {
++        char from[PATH_MAX], to[PATH_MAX]; struct stat st;
++        if (path(from, save, i ? "_device" : "") || path(to, dir, i ? "/save_device" : "/save")) return -1;
++        if (lstat(from, &st)) { if (errno == ENOENT) continue; return -1; }
++        if (!S_ISDIR(st.st_mode)) { errno = EINVAL; return -1; }
++        if (dm_fs_clone_committed(from, to)) return -1;
++    }
++    return 0;
++}
++
++int mac_save_export(const char *save, const char *title, const char *archive) {
++    char root[PATH_MAX], tmp[PATH_MAX], snap[PATH_MAX], out[PATH_MAX];
++    if (save_path(save, root) || path(tmp, root, ".export-XXXXXX") || path(out, archive, ".partial-XXXXXX")) return -1;
++    if (!mkdtemp(tmp)) return -1;
++    int fd = mkstemp(out), r = -1; ss_meta meta;
++    if (fd < 0) goto done;
++    close(fd);
++    if (snapshot(root, tmp) || path(snap, tmp, "/save") || ss_pack(snap, title, out, &meta)) goto done;
++    if (!meta.files) { errno = ENODATA; goto done; }
++    // A failed pack never overwrites a previously exported archive.
++    r = rename(out, archive);
++done:;
++    int e = errno; if (r) unlink(out); discard(tmp); errno = e; return r;
++}
++
++int mac_save_restore(const char *save, const char *title, const char *archive, char *kept, size_t size) {
++    char root[PATH_MAX], tmp[PATH_MAX], recovery[PATH_MAX]; ss_meta meta;
++    if (size) *kept = 0;
++    // Check before making a recovery folder or changing the save. Never accept another game's backup.
++    if (ss_read(archive, NULL, &meta) || strcasecmp(meta.title, title) || !meta.files) { errno = EINVAL; return -1; }
++    if (save_path(save, root) || path(tmp, root, ".restore-XXXXXX") || path(recovery, root, ".before-restore-XXXXXX")) return -1;
++    if (strlen(recovery) + 1 > size) { errno = ENAMETOOLONG; return -1; }
++    if (!mkdtemp(tmp)) return -1;
++    int r = -1, changed = 0, existed[2] = {0};
++    char here[2][PATH_MAX], incoming[2][PATH_MAX];
++    if (ss_read(archive, tmp, &meta) || strcasecmp(meta.title, title) || !meta.files) { errno = EINVAL; goto done; }
++    // Prepare both directories before touching either. A backup without a device save removes the old device save too.
++    for (int i = 0; i < 2; i++) {
++        struct stat st;
++        if (path(here[i], root, i ? "_device" : "") || path(incoming[i], tmp, i ? "/save_device" : "/save")) goto done;
++        if (mkdir(incoming[i], 0700) && errno != EEXIST) goto done;
++        if (!lstat(here[i], &st)) { if (!S_ISDIR(st.st_mode)) { errno = EINVAL; goto done; } existed[i] = 1; }
++        else if (errno != ENOENT) goto done;
++    }
++    if (!mkdtemp(recovery)) goto done;
++    if (snapshot(root, recovery)) { int e = errno; discard(recovery); errno = e; goto done; }
++    strlcpy(kept, recovery, size);
++    for (int i = 0; i < 2; i++) {
++        if (existed[i] ? renamex_np(incoming[i], here[i], RENAME_SWAP) : rename(incoming[i], here[i])) {
++            int e = errno;
++            for (int j = changed - 1; j >= 0; j--) {
++                if (existed[j] ? renamex_np(incoming[j], here[j], RENAME_SWAP) : rename(here[j], incoming[j])) {
++                    // Leave both staging and recovery folders available if rollback itself fails.
++                    fprintf(stderr, "[RED] save restore rollback failed; recovery %s, staging %s\n", recovery, tmp);
++                    return -1;
++                }
++            }
++            errno = e; goto done;
++        }
++        changed++;
++    }
++    r = 0;
++done:;
++    int e = errno; discard(tmp); errno = e; return r;
++}
+diff --git a/dm/host/save_backup_mac.h b/dm/host/save_backup_mac.h
+new file mode 100644
+index 00000000..3bece7b7
+--- /dev/null
++++ b/dm/host/save_backup_mac.h
+@@ -0,0 +1,6 @@
++// Manual Mac backups use the cloud save's checked format, including device saves and guest-name metadata.
++#pragma once
++#include <stddef.h>
++int mac_save_export(const char *save, const char *title, const char *archive);
++// No host may be using this save. Keeps a recovery copy in `kept`; a failed replacement rolls back.
++int mac_save_restore(const char *save, const char *title, const char *archive, char *kept, size_t size);
+diff --git a/dm/host/tests/Makefile b/dm/host/tests/Makefile
+index 1c20254e..3ae12057 100644
+--- a/dm/host/tests/Makefile
++++ b/dm/host/tests/Makefile
+@@ -77,6 +77,8 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
+ 	TMPDIR="$(abspath $(B))" $(B)/t_cheats $(QUIET)
+ 	$(B)/t_nro
+ 	$(B)/t_symbols
++	$(B)/t_mac_backup
++	$(B)/t_mac_menus
+ run: $(B)/t_nro
+ run: $(B)/t_sync_wait
+ $(B)/t_sync_wait: t_sync_wait.c t_condvar_stub.c ../hle_thread.c ../dm.h $(GAME_H) | $(B)
+@@ -152,6 +154,15 @@ fs-tsan: $(B)/t_fs_commit_list_tsan
+ $(B)/t_fs_case: t_fs_case.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+ 	$(CLANG) -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs_case.c ../hle_bigstack.c ../save_sync.c
+ run: $(B)/t_save_sync $(B)/t_save_sync_metadata
++run: $(B)/t_mac_backup $(B)/t_mac_menus
++$(B)/t_mac_backup: t_mac_backup.c ../save_backup_mac.c ../save_backup_mac.h ../save_sync.c ../save_sync.h | $(B)
++	$(CLANG) -O1 -g -Wall -Wextra -Wno-deprecated-declarations -I.. -o $@ t_mac_backup.c ../save_sync.c
++$(B)/t_mac_menus: t_mac_menus.m ../menus_mac.m ../menus_mac.h ../save_backup_mac.c ../save_backup_mac.h ../save_sync.c ../save_sync.h ../hle.h ../dm.h $(GAME_H) | $(B)
++	$(CLANG) -O1 -g -Wall -Wextra -Wno-unused-function -Wno-deprecated-declarations -fobjc-arc -I.. $(GINC) -o $@ t_mac_menus.m ../save_backup_mac.c ../save_sync.c -framework Cocoa -framework UniformTypeIdentifiers
++.PHONY: mac-menus
++mac-menus: $(B)/t_mac_backup $(B)/t_mac_menus
++	$(B)/t_mac_backup
++	$(B)/t_mac_menus
+ $(B)/t_save_sync: t_save_sync.c t_fs_stub.c ../hle_fs.c ../save_sync.c ../save_sync.h ../hle_bigstack.c ../hle.h ../dm.h $(GAME_H) | $(B)
+ 	$(CLANG) -O1 -Wall -Wno-unused-function -I.. $(GINC) -o $@ t_save_sync.c t_fs_stub.c ../hle_bigstack.c ../save_sync.c
+ $(B)/t_save_sync_metadata: t_save_sync_metadata.c ../save_sync.c ../save_sync.h | $(B)
+diff --git a/dm/host/tests/t_audio.c b/dm/host/tests/t_audio.c
+index 4a9dc49f..cb918916 100644
+--- a/dm/host/tests/t_audio.c
++++ b/dm/host/tests/t_audio.c
+@@ -95,7 +95,24 @@ static int test_output_lifetime(void) {
+     printf("AudioOut fields and lifetime (%s): %d guarded open / close / unmap / resume cycles, no consumer left\n", real_audio() ? "real output" : "silent sink", CYCLES);
+     return 0;
+ }
++static int test_mute_output(void) {
++    const int levels[] = {-10, 0, 25, 37, 50, 75, 100, 110};
++    for (int muted = 0; muted <= 1; muted++) for (size_t level = 0; level < sizeof levels / sizeof levels[0]; level++) {
++        int gain = levels[level] < 0 ? 0 : levels[level] > 100 ? 100 : levels[level];
++        int16_t pcm[32], out[32];
++        for (int i = 0; i < 32; i++) pcm[i] = i % 2 ? -12345 : 12345;
++        gbuf b = {pcm, sizeof pcm, sizeof pcm}; aout a = {.ch = 2};
++        atomic_init(&a.state, STATE_STARTED); atomic_init(&a.vol, 0x3f800000u);
++        a.q[0] = &b; atomic_init(&a.q_tail, 1);
++        AudioBufferList bl = {.mNumberBuffers = 1, .mBuffers = {{2, sizeof out, out}}};
++        dm_audio_volume(levels[level]); dm_audio_mute(muted); au_render(&a, NULL, NULL, 0, 16, &bl);
++        for (int i = 0; i < 32; i++) if (out[i] != (muted ? 0 : pcm[i] * gain / 100)) { puts("FAIL volume/mute output"); return 1; }
++        if (atomic_load(&a.q_head) != 1 || atomic_load(&a.rel_tail) != 1 || a.rel[0] != &b) { puts("FAIL muted buffer release"); return 1; }
++    }
++    dm_audio_mute(0); dm_audio_volume(100); puts("volume and mute: output gain, bounds and buffer consumption/release verified"); return 0;
++}
+ int main(void) {
++    if (test_mute_output()) return 1;
+     if (test_surround_output() || test_output_lifetime()) return 1;
+     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
+     h_au_InitParam(prm);
+diff --git a/dm/host/tests/t_mac_backup.c b/dm/host/tests/t_mac_backup.c
+new file mode 100644
+index 00000000..2bac3161
+--- /dev/null
++++ b/dm/host/tests/t_mac_backup.c
+@@ -0,0 +1,53 @@
++// Manual backup round trips, wrong/damaged archives, and rollback on a failed second directory swap.
++#include <assert.h>
++#include <errno.h>
++#include <sys/stat.h>
++#include <sys/xattr.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <removefile.h>
++static int swaps, fail_swap;
++static int swap_for_test(const char *a, const char *b, unsigned flags) {
++    if (++swaps == fail_swap) { errno = EIO; return -1; }
++    return renamex_np(a, b, flags);
++}
++#define renamex_np swap_for_test
++#include "../save_backup_mac.c"
++#undef renamex_np
++static void put(const char *p, const char *value) { FILE *f = fopen(p, "w"); assert(f); assert(fputs(value, f) >= 0); assert(!fclose(f)); }
++static void contents(const char *p, const char *value) { char b[128] = {0}; FILE *f = fopen(p, "r"); assert(f); assert(fread(b, 1, sizeof b - 1, f) == strlen(value)); assert(!fclose(f)); assert(!strcmp(b, value)); }
++int main(void) {
++    char dir[] = "/tmp/nxnative-backup-XXXXXX"; assert(mkdtemp(dir)); assert(!chdir(dir));
++    assert(!mkdir("save", 0700)); assert(!mkdir("save_device", 0700));
++    put("save/a", "old normal"); put("save_device/b", "old device");
++    assert(!setxattr("save/a", "org.d2rmobile.guest-name", "A", 1, 0, 0));
++    assert(!mac_save_export("save/", "010093801237C000", "backup.dmsync"));
++    ss_meta m; assert(!ss_read("backup.dmsync", NULL, &m)); assert(m.files == 2);
++    put("save/a", "new normal"); put("save_device/b", "new device"); put("save/extra", "remove me");
++    char kept[PATH_MAX];
++    assert(mac_save_restore("save", "another-game", "backup.dmsync", kept, sizeof kept));
++    contents("save/a", "new normal");
++    put("broken.dmsync", "DMSYNC1\ntruncated");
++    assert(mac_save_restore("save", "010093801237C000", "broken.dmsync", kept, sizeof kept));
++    contents("save/a", "new normal");
++    swaps = 0; fail_swap = 2;
++    assert(mac_save_restore("save", "010093801237C000", "backup.dmsync", kept, sizeof kept));
++    contents("save/a", "new normal"); contents("save_device/b", "new device"); contents("save/extra", "remove me");
++    assert(*kept); char p[PATH_MAX]; snprintf(p, sizeof p, "%s/save/a", kept); contents(p, "new normal");
++    fail_swap = 0;
++    assert(!mac_save_restore("save/", "010093801237C000", "backup.dmsync", kept, sizeof kept));
++    contents("save/a", "old normal"); contents("save_device/b", "old device"); assert(access("save/extra", F_OK));
++    char guest[8]; assert(getxattr("save/a", "org.d2rmobile.guest-name", guest, sizeof guest, 0, 0) == 1 && *guest == 'A');
++    snprintf(p, sizeof p, "%s/save/extra", kept); contents(p, "remove me");
++    assert(!mkdir("empty", 0700)); assert(mac_save_export("empty", "010093801237C000", "backup.dmsync"));
++    assert(!ss_read("backup.dmsync", NULL, &m) && m.files == 2);   // failed exports keep the previous archive
++    assert(!removefile("save_device", NULL, REMOVEFILE_RECURSIVE));
++    assert(!mac_save_export("save", "010093801237C000", "normal-only.dmsync"));
++    assert(!mkdir("save_device", 0700)); put("save_device/extra", "remove device");
++    assert(!mac_save_restore("save", "010093801237C000", "normal-only.dmsync", kept, sizeof kept));
++    assert(access("save_device/extra", F_OK));
++    assert(!chdir("/")); assert(!removefile(dir, NULL, REMOVEFILE_RECURSIVE));
++    puts("Mac save backups: round trip, metadata, recovery, failed-swap rollback, invalid archives, empty exports and device removal pass");
++    return 0;
++}
+diff --git a/dm/host/tests/t_mac_menus.m b/dm/host/tests/t_mac_menus.m
+new file mode 100644
+index 00000000..10d30113
+--- /dev/null
++++ b/dm/host/tests/t_mac_menus.m
+@@ -0,0 +1,118 @@
++// Real AppKit actions, isolated preferences and a synthetic runtime settings page; no user data or audio device.
++// Verified here is the menus' own behavior: choice persistence and default removal, launch-override precedence,
++// capability gating and numeric bounds of the runtime settings, checked/disabled validation against live state,
++// and the mute/focus invariants. The output gain behind the volume slider is exercised by t_audio.
++#include <assert.h>
++#include "../menus_mac.m"
++static int test_mode = 1, test_muted;
++uint8_t *dm_fps_state;
++int dm_opmode(void) { return test_mode; }
++void dm_set_opmode(int m) { test_mode = m; }
++void dm_audio_mute(int on) { test_muted = on; }
++void dm_audio_volume(int percent) { (void)percent; }   // the gain itself is t_audio's; linked because the menus reference it
++void dm_gfx_shot_at(long frame, const char *p) { (void)frame; (void)p; }
++static NSMenuItem *choice(NSString *env, NSString *value) {
++    NSMenuItem *item = [NSMenuItem new]; item.representedObject = @{@"env": env, @"value": value}; return item;
++}
++static float state_at(size_t offset) { float n; memcpy(&n, dm_fps_state + offset, sizeof n); return n; }
++static NSString *saved(NSString *domain, NSString *env) {
++    NSString *key = [@"launcher." stringByAppendingString:env];
++    CFPropertyListRef value = CFPreferencesCopyAppValue((__bridge CFStringRef)key, (__bridge CFStringRef)domain);
++    NSString *s = value && CFGetTypeID(value) == CFStringGetTypeID() ? [(__bridge NSString *)value copy] : nil;
++    if (value) CFRelease(value); return s;
++}
++int main(void) {
++    @autoreleasepool {
++        [NSApplication sharedApplication];
++        NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 450) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
++        NSMenu *bar = [NSMenu new];
++        mac_menus_install(w, bar);
++        DmMacMenus *m = [[bar itemWithTitle:@"File"].submenu itemWithTitle:@"Open Save Folder"].target;
++        assert(m);
++        m.domain = [@"org.nxnative.menu-test." stringByAppendingString:NSUUID.UUID.UUIDString];
++        m.settings = @{
++            @"DM_OPMODE": @{@"kind": @"choice", @"label": @"Console mode", @"default": @"1", @"options": @[@[@"1", @"Docked"], @[@"0", @"Handheld"]]},
++            @"DM_FPS_TARGET": @{@"kind": @"choice", @"label": @"Frame rate", @"default": @"60", @"options": @[@[@"30", @"30 fps"], @[@"60", @"60 fps"]]},
++            @"DM_RENDER_SCALE": @{@"kind": @"range", @"label": @"Render scale", @"default": @"1.0", @"min": @0.5, @"max": @1.0, @"step": @0.05}
++        };
++
++        // Console mode goes through dm_set_opmode and is saved as the app's choice; choosing the default removes the key again
++        [m chooseSetting:choice(@"DM_OPMODE", @"0")];
++        assert(test_mode == 0 && [saved(m.domain, @"DM_OPMODE") isEqual:@"0"]);
++        [m chooseSetting:choice(@"DM_OPMODE", @"1")];
++        assert(test_mode == 1 && !saved(m.domain, @"DM_OPMODE"));
++
++        // A variable the launch environment or an env file set is the launcher's, not the menu's to change
++        setenv("DM_ENV_LAUNCH_KEYS", "DM_LANG DM_OPMODE", 1);
++        [m chooseSetting:choice(@"DM_OPMODE", @"0")];
++        assert(test_mode == 1);
++        unsetenv("DM_ENV_LAUNCH_KEYS"); setenv("DM_ENV_FILE_KEYS", "DM_OPMODE", 1);
++        [m chooseSetting:choice(@"DM_OPMODE", @"0")];
++        assert(test_mode == 1);
++        unsetenv("DM_ENV_FILE_KEYS");
++        [m chooseSetting:choice(@"DM_OPMODE", @"0")];
++        setenv("DM_SAVED_CHOICES", "0", 1);
++        [m chooseSetting:choice(@"DM_OPMODE", @"1")];
++        assert(test_mode == 1 && [saved(m.domain, @"DM_OPMODE") isEqual:@"0"]);   // a session that ignores saved choices does not erase them
++        unsetenv("DM_SAVED_CHOICES");
++        [m chooseSetting:choice(@"DM_OPMODE", @"1")];
++
++        // Frame rate and render scale need the runtime capability (the frame step state page); without it nothing is offered
++        NSMenu *settings = [NSMenu new];
++        setting_menu(settings, @"DM_FPS_TARGET", m);
++        assert(settings.numberOfItems == 0);
++        _Alignas(8) uint8_t page[64] = {0}; dm_fps_state = page;
++        setting_menu(settings, @"DM_FPS_TARGET", m); setting_menu(settings, @"DM_RENDER_SCALE", m);
++        NSMenu *fps = [settings itemWithTitle:@"Frame Rate"].submenu, *scale = [settings itemWithTitle:@"Render Scale"].submenu;
++        NSMenuItem *fps30 = [fps itemWithTitle:@"30 fps"], *fps60 = [fps itemWithTitle:@"60 fps"], *scale85 = [scale itemWithTitle:@"85%"];
++        assert(fps30 && fps60 && scale85);
++
++        // The checked mark follows the live state (not the saved choice), and each choice lands on its own state page word
++        [m chooseSetting:fps30];
++        assert(state_at(0) == 30 && [saved(m.domain, @"DM_FPS_TARGET") isEqual:@"30"]);
++        assert([m validateMenuItem:fps30] && fps30.state == NSControlStateValueOn);
++        assert([m validateMenuItem:fps60] && fps60.state == NSControlStateValueOff);
++        [m chooseSetting:fps60];
++        assert(state_at(0) == 60 && !saved(m.domain, @"DM_FPS_TARGET"));
++        [m chooseSetting:scale85];
++        assert(fabs(state_at(0x10) - 0.85) < 1e-6);
++
++        // Values outside the declared options and bounds never reach the state page
++        [m chooseSetting:choice(@"DM_FPS_TARGET", @"0")];
++        assert(state_at(0) == 60);
++        [m chooseSetting:choice(@"DM_RENDER_SCALE", @"1.00")];
++        assert(state_at(0x10) == 1 && !saved(m.domain, @"DM_RENDER_SCALE"));
++        [m chooseSetting:choice(@"DM_RENDER_SCALE", @"2")];
++        assert(state_at(0x10) == 1);
++
++        // A launch override disables the runtime setting's row as well
++        setenv("DM_ENV_FILE_KEYS", "DM_RENDER_SCALE", 1);
++        [m chooseSetting:scale85];
++        assert(state_at(0x10) == 1 && ![m validateMenuItem:scale85]);
++        unsetenv("DM_ENV_FILE_KEYS");
++
++        // A manual mute holds whatever the focus does; "mute when unfocused" follows the window, and only then
++        mac_menus_focus(1); [m mute:nil];
++        assert(test_muted);
++        mac_menus_focus(0); mac_menus_focus(1);
++        assert(test_muted);
++        [m mute:nil]; [m muteUnfocused:nil];
++        assert(!test_muted);
++        mac_menus_focus(0);
++        assert(test_muted);
++        mac_menus_focus(1);
++        assert(!test_muted);
++
++        // The restore transaction is offered only while the launcher has prepared its restore directory
++        NSMenuItem *restore = [[bar itemWithTitle:@"File"].submenu itemWithTitle:@"Restore Save from Backup…"];
++        setenv("DM_SAVE", "/", 1); setenv("DM_MAC_RESTORE_DIR", "/tmp/nxnative-menu-test-restore", 1);
++        assert([m validateMenuItem:restore]);
++        unsetenv("DM_MAC_RESTORE_DIR");
++        assert(![m validateMenuItem:restore]);
++        unsetenv("DM_SAVE");
++
++        [w close];
++        puts("Mac menus: choice persistence and default removal, launch overrides, capability gating, bounds, live checked state and mute/focus invariants pass");
++    }
++    return 0;
++}
+diff --git a/dm/mac/Launcher.swift b/dm/mac/Launcher.swift
+index a990d05b..525fe4ed 100644
+--- a/dm/mac/Launcher.swift
++++ b/dm/mac/Launcher.swift
+@@ -258,6 +258,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate
+     init(_ model: LauncherModel) { self.model = model }
+ 
+     func applicationDidFinishLaunching(_ n: Notification) {
++        NSWindow.allowsAutomaticWindowTabbing = false
+         let name = info("CFBundleName") ?? "Game"
+         let menu = NSMenu(), item = NSMenuItem(), app = NSMenu()
+         app.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+@@ -265,6 +266,7 @@ private final class Launcher: NSObject, NSApplicationDelegate, NSWindowDelegate
+         item.submenu = app; menu.addItem(item); NSApp.mainMenu = menu
+         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+         w.title = name; w.isReleasedWhenClosed = false; w.delegate = self
++        w.tabbingMode = .disallowed
+         w.contentMinSize = NSSize(width: 520, height: 0)
+         window = w
+         if let screen = w.screen ?? NSScreen.main {
+diff --git a/dm/mac/launcher.c b/dm/mac/launcher.c
+index 029dccea..b75caaff 100644
+--- a/dm/mac/launcher.c
++++ b/dm/mac/launcher.c
+@@ -22,10 +22,13 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
++#include <sys/file.h>
+ #include <sys/wait.h>
+ #include <unistd.h>
+ #include "romfs_image.h"
+ #include "save_sync.h"
++#include "save_backup_mac.h"
++#include <removefile.h>
+ 
+ extern char **environ;
+ int dm_mac_launcher(void);   // Launcher.swift: 1 = Play (the settings are in the environment), 0 = the player quit, 2 = no window (apply the saved choices here)
+@@ -47,12 +50,13 @@ static int info_string(const char *key, char *out, size_t n) {   // a string key
+     return v && CFGetTypeID(v) == CFStringGetTypeID() && CFStringGetCString(v, out, (CFIndex)n, kCFStringEncodingUTF8) && *out;
+ }
+ 
+-static void alert(const char *title, const char *msg) {   // a dialog (the app has no window of its own), and the same line on stderr
+-    fprintf(stderr, "[RED] %s\n", msg);
++static void notice(const char *title, const char *msg) {   // a dialog (the app has no window of its own), and the same line on stderr
++    fprintf(stderr, "launcher: %s\n", msg);
+     char *script = "on run argv\ndisplay alert (item 1 of argv) message (item 2 of argv) as critical\nend run";
+     char *argv[] = {"osascript", "-e", script, (char *)title, (char *)msg, NULL}; pid_t pid; int st;
+     if (!posix_spawnp(&pid, "osascript", NULL, NULL, argv, environ)) while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
+ }
++static void alert(const char *title, const char *msg) { fprintf(stderr, "[RED] %s\n", msg); notice(title, msg); }
+ 
+ static int modules_present(const char *dm) {   // the packer's inventory detects even a missing binary/table pair
+     CFBundleRef b = CFBundleGetMainBundle(); if (!b) return 0;
+@@ -215,18 +219,48 @@ int main(int argc, char **argv) {
+     if (*lang) setenv("DM_LANG", lang, 0);
+     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
+     programs_table(contents, res, sup);
++    // Resolve relative save paths in the same working folder the host will inherit.
+     if (chdir(sup)) { fprintf(stderr, "[RED] launcher: cannot enter %s\n", sup); return 1; }
++    // Keep two app instances from using the same save while one restores it. CLOEXEC keeps the lease in this supervising process.
++    char effective[PATH_MAX], lease[PATH_MAX], restore[PATH_MAX] = "";
++    mkdirs(getenv("DM_SAVE"));
++    if (!realpath(getenv("DM_SAVE"), effective) || snprintf(lease, sizeof lease, "%s.mac-lock", effective) >= (int)sizeof lease) {
++        alert(name, "The save folder is unavailable. The game was not started."); return 1;
++    }
++    int lock = open(lease, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
++    if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB)) { if (lock >= 0) close(lock); alert(name, "Another game instance is using this save folder, or it cannot be locked. Close that instance before starting this one."); return 1; }
++    // A private per-run folder carries one checked restore request from the host to its parent. Never trust an inherited path.
++    unsetenv("DM_MAC_RESTORE_DIR");
++    if (snprintf(restore, sizeof restore, "%s/restore-XXXXXX", temp) < (int)sizeof restore && mkdtemp(restore)) setenv("DM_MAC_RESTORE_DIR", restore, 1);
++    else *restore = 0;
+     struct sigaction sa = {.sa_handler = forward};   // no SA_RESTART: waitpid below sees EINTR and waits again
+     sigemptyset(&sa.sa_mask);
+     sigaction(SIGTERM, &sa, NULL); sigaction(SIGINT, &sa, NULL); sigaction(SIGHUP, &sa, NULL);
+     char *host_argv[] = {host, dm, NULL};
+     int err = posix_spawn(&g_child, host, NULL, NULL, host_argv, environ);
+-    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); return 1; }
++    if (err) { fprintf(stderr, "[RED] launcher: cannot start %s: %s\n", host, strerror(err)); if (*restore) removefile(restore, NULL, REMOVEFILE_RECURSIVE); close(lock); return 1; }
+     int status;
+     while (waitpid(g_child, &status, 0) < 0) if (errno != EINTR) return 1;
+     // Cloud saves (DM_SAVE_SYNC, dm/host/save_sync.h): what the host committed and had not sent yet goes now, after a crash too (the committed save is whole whatever the host was doing)
+     // DM_SAVE as the host had it: an env file or the launch environment may have set another folder than this app's own
+-    if (!save_sync_after_exit(getenv("DM_SAVE"), id)) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
++    int synced = save_sync_after_exit(getenv("DM_SAVE"), id);
++    if (!synced) fprintf(stderr, "launcher: the save did not reach the cloud; it goes at the next start\n");
++    if (*restore) {
++        char ready[PATH_MAX], archive[PATH_MAX], kept[PATH_MAX], result[PATH_MAX + 256];
++        snprintf(ready, sizeof ready, "%s/ready", restore); snprintf(archive, sizeof archive, "%s/backup.dmsync", restore);
++        if (!access(ready, F_OK)) {
++            if (!synced || !WIFEXITED(status) || WEXITSTATUS(status)) alert(name, "The restore was cancelled because the game did not close cleanly or its current save could not reach the cloud. Your current save was kept.");
++            else if (mac_save_restore(getenv("DM_SAVE"), id, archive, kept, sizeof kept)) {
++                snprintf(result, sizeof result, "The restore failed: %s. Recovery folder: %s", strerror(errno), *kept ? kept : "no replacement was made"); alert(name, result);
++            } else {
++                int sent = save_sync_after_exit(effective, id);
++                snprintf(result, sizeof result, "Save restored. Start the game again to use it. Your previous save is in %s.%s", kept, sent ? "" : " The restored save has not reached the cloud yet; retry before playing on another device.");
++                notice(name, result);
++            }
++        }
++        removefile(restore, NULL, REMOVEFILE_RECURSIVE);
++    }
++    close(lock);
+     if (WIFSIGNALED(status)) { fprintf(stderr, "launcher: the host stopped on signal %d\n", WTERMSIG(status)); return 128 + WTERMSIG(status); }
+     fprintf(stderr, "launcher: the host exited with %d\n", WEXITSTATUS(status));
+     return WEXITSTATUS(status);
+diff --git a/dm/mac/pack_app.py b/dm/mac/pack_app.py
+index 062c2cb7..04995cfb 100755
+--- a/dm/mac/pack_app.py
++++ b/dm/mac/pack_app.py
+@@ -91,10 +91,10 @@ def swift_sources():   # the settings window, with the iOS launcher's model, row
+     return [HERE / 'Launcher.swift', HERE.parent / 'ios/Sources/LauncherSettings.swift', HERE.parent / 'ios/Sources/LauncherRow.swift', HERE.parent / 'ios/Sources/SaveSyncReport.swift']
+ 
+ 
+-def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save code (its send after the host exits), linked by swiftc with the settings window (no Swift main: -parse-as-library)
++def build_launcher(out, minos, clang, swiftc, sdk):   # launcher.c's main and the host's cloud-save and backup-restore code (its send after the host exits, and its restore of a backup then), linked by swiftc with the settings window (no Swift main: -parse-as-library)
+     with tempfile.TemporaryDirectory(dir=out.parents[3]) as t:
+-        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o']
+-        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c')):
++        objs = [Path(t) / 'launcher.o', Path(t) / 'save_sync.o', Path(t) / 'save_backup_mac.o']
++        for obj, src in zip(objs, (HERE / 'launcher.c', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_backup_mac.c')):
+             run([clang, '-isysroot', sdk, '-arch', 'arm64', f'-mmacosx-version-min={minos}', '-O2', '-Wall', '-I', HERE.parent / 'host', '-c', '-o', obj, src])
+         run([swiftc, '-sdk', sdk, '-target', f'arm64-apple-macos{minos}', '-O', '-swift-version', '5', '-parse-as-library', '-module-cache-path', Path(t) / 'module-cache',
+              '-o', out, *swift_sources(), *objs, '-framework', 'CoreFoundation', '-framework', 'AppKit', '-framework', 'SwiftUI'])
+@@ -287,7 +287,7 @@ def pack(a):
+         if not codesign: raise SystemExit('codesign is not available')
+         codesign = Path(codesign).resolve()
+         minos = min_os(a.host)
+-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
++        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'host/save_backup_mac.c', HERE.parent / 'host/save_backup_mac.h', HERE.parent / 'tools/romfs.py'] + swift_sources()
+         inputs = {'options': vars(a), 'files': [(str(p), p.stat().st_mode, digest(p), os.readlink(p) if p.is_symlink() else None) for p in files + sources],
+                   'trees': [(p, inventory(Path(p))) for p in (a.romfs, a.aoc, a.html, *(str(x[1]) for x in programs), *(str(x[3]) for x in programs)) if p and Path(p).exists()],
+                   'tools': [[str(c), c.stat().st_mode, c.stat().st_size, c.stat().st_mtime_ns, c.stat().st_ctime_ns, run([c, '--version']).strip()] for c in (clang, swiftc)] + [
+diff --git a/dm/tools/impact_map.tsv b/dm/tools/impact_map.tsv
+index 691cb6c6..76258f30 100644
+--- a/dm/tools/impact_map.tsv
++++ b/dm/tools/impact_map.tsv
+@@ -132,6 +132,8 @@ dm/host/romfs_identity.h	*:*	RomFS identity checks at iOS startup for every game
+ dm/host/hle_fs.c	hle:*fs*	filesystem mounts, paths and file operations
+ dm/host/hle_audio.c:(notify_release|event_notify)	hle:*AudioOutE*	guest AudioOut buffer-release notifications; the host renderer uses rel_sem
+ dm/host/save_sync.*	hle:*fs*	cloud saves: the first save mount and every Commit (hle_fs.c)
++dm/host/save_backup_mac.*	hle:*fs*	manual Mac backups snapshot and replace committed normal and device saves
++dm/host/hle.h	*:*	shared host service interfaces
+ dm/host/Makefile	*:*	the shared host build
+ dm/host/hle_thread.c	svc:*	threads and synchronization
+ dm/host/hle_svc.c	svc:*	SVCs
+@@ -140,6 +142,7 @@ dm/host/main.c	*:*	the host's start
+ dm/host/loader.c	*:*	module loading
+ dm/host/hle.c	hle:*	the HLE tables
+ dm/host/front_mac.m	present:*	the Mac front end
++dm/host/menus_mac.*	present:*	Mac in-game menu actions and focus-dependent mute
+ dm/host/dm_input.h	hle:*hid*	the shared input interface
+ dm/host/motion_apple.h	hle:*SixAxisSensor*	controller motion supplied by GameController
+ dm/host/pad_apple.h	hle:*hid*	controller face buttons from GameController
+diff --git a/dm/tools/tests/test_nsp_mac_app.py b/dm/tools/tests/test_nsp_mac_app.py
+index 58ae7878..cce5c3bf 100644
+--- a/dm/tools/tests/test_nsp_mac_app.py
++++ b/dm/tools/tests/test_nsp_mac_app.py
+@@ -42,6 +42,17 @@ int main(int argc, char **argv) {
+     for (int i = 0; i < argc; i++) fprintf(f, "argv%d=%s\n", i, argv[i]);
+     char cwd[1024]; fprintf(f, "cwd=%s\n", getcwd(cwd, sizeof cwd)); fclose(f);
+     printf("standin host output\n"); fflush(stdout);
++    if (getenv("STANDIN_RESTORE")) {
++        char to[1024], ready[1024];
++        snprintf(to, sizeof to, "%s/backup.dmsync", getenv("DM_MAC_RESTORE_DIR"));
++        FILE *in = fopen(getenv("STANDIN_RESTORE"), "rb"), *out = fopen(to, "wb");
++        if (!in || !out) return 9;
++        int c; while ((c = fgetc(in)) != EOF) fputc(c, out);
++        fclose(in); fclose(out);
++        snprintf(ready, sizeof ready, "%s/ready", getenv("DM_MAC_RESTORE_DIR"));
++        out = fopen(ready, "w"); if (!out) return 9; fclose(out);
++        return 0;
++    }
+     if (getenv("STANDIN_WAIT")) { signal(SIGTERM, term); for (;;) pause(); }
+     return 7;
+ }
+@@ -118,7 +129,8 @@ class PackReuse(unittest.TestCase):
+             'font/nintendo_ext.ttf': b'font', 'aoc/1/data': b'dlc', 'pso/gpu.mtl4a': b'archive',
+             'pso/prebuilt.tsv': b'prebuilt', 'pso/rest_pairs.tsv': b'rest', 'pso/archive.tsv': b'index',
+             'env.txt': b'DM_TEST=1', 'split.tsv': b'split', 'icon.jpg': b'jpeg', 'source/launcher.c': b'launcher',
+-            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api', 'tools/romfs.py': b'reader',
++            'host/romfs_image.h': b'validator', 'host/save_sync.c': b'sync', 'host/save_sync.h': b'sync api',
++            'host/save_backup_mac.c': b'backup', 'host/save_backup_mac.h': b'backup api', 'tools/romfs.py': b'reader',
+             'source/Launcher.swift': b'window', 'ios/Sources/LauncherSettings.swift': b'model', 'ios/Sources/LauncherRow.swift': b'rows', 'ios/Sources/SaveSyncReport.swift': b'report',
+         }
+         for n in pack_app.TABLES: files['profile/' + n] = n.encode()
+@@ -205,7 +217,8 @@ class PackReuse(unittest.TestCase):
+                  'patched/main.obs.tsv', 'patched/nro.tsv', 'msl/k.metallib', 'msl/k.json', 'msl/inputs.tsv', 'font/nintendo_ext.ttf',
+                  'pso/gpu.mtl4a', 'pso/prebuilt.tsv', 'pso/rest_pairs.tsv', 'pso/archive.tsv', 'env.txt', 'icon.jpg', 'source/launcher.c',
+                  'source/Launcher.swift', 'ios/Sources/LauncherSettings.swift', 'ios/Sources/LauncherRow.swift', 'ios/Sources/SaveSyncReport.swift',   # the settings window's sources
+-                 'host/save_sync.c', 'host/save_sync.h']   # the cloud-save code the launcher links (its send after the host exits)
++                 'host/save_sync.c', 'host/save_sync.h',   # the cloud-save code the launcher links (its send after the host exits)
++                 'host/save_backup_mac.c', 'host/save_backup_mac.h']   # the backup restore it runs once the host has exited
+         names += ['profile/' + n for n in pack_app.TABLES]
+         for name in names:
+             with self.subTest(name=name):
+@@ -256,17 +269,6 @@ class PackReuse(unittest.TestCase):
+         self.codesign = self.tmp / 'bin/other-codesign'; self.assert_repacked()
+         self.codesign.write_text('changed signing tool'); self.assert_repacked()
+ 
+-    def test_launcher_is_linked_from_its_c_and_swift_sources(self):
+-        self.pack()
+-        c = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c)
+-        s = next(c for c in self.commands if Path(c[0]).name == 'swiftc' and '-o' in c)
+-        self.assertIn('-c', c); self.assertIn('-parse-as-library', s)
+-        self.assertEqual(s[s.index('-o') + 1], str(Path(self.args.out).resolve().with_name('Game.app.partial') / 'Contents/MacOS/nxnative'))
+-        self.assertIn(c[c.index('-o') + 1], s)   # launcher.c's object, with its main
+-        sync = next(c for c in self.commands if Path(c[0]).name == 'clang' and '-o' in c and c[-1].endswith('save_sync.c'))
+-        self.assertIn(sync[sync.index('-o') + 1], s)   # save_sync.c's object: the launcher sends the save once the host has exited
+-        self.assertEqual([Path(x).name for x in s if x.endswith('.swift')], ['Launcher.swift', 'LauncherSettings.swift', 'LauncherRow.swift', 'SaveSyncReport.swift'])
+-
+     def test_selected_file_modes_and_file_additions_and_removals_invalidate(self):
+         self.pack()
+         (self.tmp / 'dmhost').chmod(0o755); self.assert_repacked()
+@@ -604,6 +606,64 @@ class App(unittest.TestCase):
+         self.assertIn('standin host output', (logs / f'{TID}.prev.log').read_text())
+         self.assertEqual(self.host_run()['DM_LANG'], 'fr')   # Info.plist DMLanguage
+ 
++    def test_restore_after_exit_and_cloud_send(self):
++        save = self.tmp / 'restore-valid'; save.mkdir(exist_ok=True)
++        (save / 'progress').write_text('archived progress')
++        tool = self.tmp / 'backup-tool'
++        source = self.tmp / 'backup-tool.c'
++        source.write_text('#include "save_backup_mac.h"\nint main(int n, char **v) { return n != 4 || mac_save_export(v[1], v[2], v[3]); }\n')
++        subprocess.run(['clang', '-O1', '-Wno-deprecated-declarations', '-I', str(REPO / 'dm/host'), source,
++                        REPO / 'dm/host/save_backup_mac.c', REPO / 'dm/host/save_sync.c', '-o', tool], check=True, capture_output=True)
++        archive = self.tmp / 'valid.dmsync'
++        subprocess.run([tool, save, TID, archive], check=True)
++        (save / 'progress').write_text('current progress')
++        cloud = self.tmp / 'restore-cloud'; cloud.mkdir(exist_ok=True)
++        p = self.launch(DM_SAVE=str(save), DM_SAVE_SYNC=str(cloud), STANDIN_RESTORE=str(archive))
++        p.communicate(timeout=30)
++        self.assertEqual(p.returncode, 0)
++        self.assertEqual((save / 'progress').read_text(), 'archived progress')
++        recovery = list(self.tmp.glob('restore-valid.before-restore-*/save/progress'))
++        self.assertTrue(recovery)
++        self.assertEqual(recovery[-1].read_text(), 'current progress')
++        self.assertIn(b'archived progress', (cloud / TID / 'save.dmsync').read_bytes())
++        self.assertFalse(Path(self.host_run()['DM_MAC_RESTORE_DIR']).exists())
++
++    def test_relative_save_lease(self):
++        p = self.launch(DM_SAVE='relative-menu-save'); p.communicate(timeout=30)
++        self.assertEqual(p.returncode, 7)
++        parent = Path(self.host_run()['cwd'])
++        self.assertTrue((parent / 'relative-menu-save').is_dir())
++        self.assertTrue((parent / 'relative-menu-save.mac-lock').is_file())
++
++    def test_save_lease(self):
++        # A second instance cannot touch saves held by a live supervising launcher.
++        save = self.tmp / 'lease-save'; save.mkdir(exist_ok=True)
++        p = self.launch(wait=True, DM_SAVE=str(save))
++        try:
++            for _ in range(100):
++                if (save.with_name(save.name + '.mac-lock')).exists(): break
++                time.sleep(0.05)
++            other = self.launch(DM_SAVE=str(save))
++            other.communicate(timeout=30)
++            self.assertEqual(other.returncode, 1)
++            self.assertIn('Another game instance', (self.tmp / 'home/alert.txt').read_text())
++        finally:
++            p.send_signal(signal.SIGTERM); p.communicate(timeout=30)
++        again = self.launch(DM_SAVE=str(save)); again.communicate(timeout=30)
++        self.assertEqual(again.returncode, 7)
++
++    def test_restore_handoff_rejects_invalid_archive(self):
++        # The child requests a restore and exits; only the parent then validates/replaces anything.
++        save = self.tmp / 'restore-save'; save.mkdir(exist_ok=True)
++        (save / 'progress').write_text('keep me')
++        archive = self.tmp / 'invalid.dmsync'; archive.write_bytes(b'DMSYNC1\ntruncated')
++        p = self.launch(DM_SAVE=str(save), STANDIN_RESTORE=str(archive))
++        p.communicate(timeout=30)
++        self.assertEqual(p.returncode, 0)
++        self.assertEqual((save / 'progress').read_text(), 'keep me')
++        request = Path(self.host_run()['DM_MAC_RESTORE_DIR'])
++        self.assertFalse(request.exists())
++
+     def test_sigterm(self):   # forwarded to the host, whose exit code comes back
+         p = self.launch(wait=True)
+         for _ in range(100):
+@@ -915,11 +975,10 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial
+         game = self.tmp / 'ex'; game.mkdir(exist_ok=True); (game / 'RomFS').mkdir(exist_ok=True)
+         return nsp.mac_run(self.tmp, game, self.tmp / 'patched', self.tmp / 'dmhost', self.tmp / 'font', self.sh / 'partial', None, 'nvn', 'en-US', {}, self.logs, self.g, **kw)
+ 
+-    def test_run_command(self):   # keeps its log for the next partial build; the bases go into an archive of their own, its stamp cleared as the keys may have grown
+-        self.assertNotIn('tee', self.run_cmd()); self.assertNotIn('DM_PSO_ARCHIVE', self.run_cmd())
++    def test_partial_run_invalidates_archive_stamp(self):   # the shader keys may have grown since the archive was built
+         stamp = self.tmp / 'run/pso_archive_partial/prebuilt.tsv'; stamp.parent.mkdir(parents=True); stamp.write_text('chain\n')
+-        cmd = self.run_cmd(partial=True)
+-        self.assertTrue(cmd.endswith(f'2>&1 | tee {self.tmp}/run/host.log')); self.assertIn(f'DM_PSO_ARCHIVE={self.tmp}/run/pso_archive_partial', cmd); self.assertFalse(stamp.exists())
++        self.run_cmd(partial=True)
++        self.assertFalse(stamp.exists())
+ 
+     def test_pack_takes_the_partial_folder(self):   # the app and its pipeline archive read b-<chain> of the folder build_shaders returned
+         ran = []
+diff --git a/docs/agents/symptoms.md b/docs/agents/symptoms.md
+index 8c175d14..fc968772 100644
+--- a/docs/agents/symptoms.md
++++ b/docs/agents/symptoms.md
+@@ -4,6 +4,7 @@ One line per symptom in the [subsystem references](../reference/): what you see
+ 
+ ## Packing
+ 
++- a Mac app offers Console mode before Play, but no Docked/Handheld switch while the game runs. The earlier menu contribution in PR #104 also predates the shared launcher, save paths and transactional saves. → [In-game menus use the launcher's choices and committed saves](../reference/packing.md#in-game-menus-use-the-launchers-choices-and-committed-saves)
+ - package identification stops with `ValueError: subsection not found` in `pfs0_names`, or LibHac reports `ResultFsPathNotFound` opening the last file of an NSP. → [PFS0 file-name table missing its final NUL](../reference/packing.md#pfs0-file-name-table-missing-its-final-nul)
+ - `no base game, only update packages: pack the base game and its update into one NUP`, even when the update carries the complete game's files (issue #1195). → [A NUP with complete standalone updates stops at "no base game"](../reference/packing.md#a-nup-with-complete-standalone-updates-stops-at-no-base-game)
+ - `[RED] a NUP packs only a game with a profile, and <title ID> has none: the survey that makes a provisional profile reads NSPs`, or the same line for a dump folder (issue #1265). A folder holding `exefs/` and `romfs/` directly, or only `updates/<version>/`, was not taken for a dump at all: the script asks for `prod.keys`, then stops with `no NSP with a readable title ID`. → [A NUP or a dump of a game with no profile stops before the survey](../reference/packing.md#a-nup-or-a-dump-of-a-game-with-no-profile-stops-before-the-survey)
+diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
+index 6d5c320f..ae427209 100644
+--- a/docs/env_switches.tsv
++++ b/docs/env_switches.tsv
+@@ -97,6 +97,7 @@ DM_LAUNCH_PARAM	path	File whose bytes `oe::TryPopLaunchParameter` returns once;
+ DM_LINK_VTICK	switch	`0` keeps the system's display-link rate on 144 or 165 Hz Mac screens; by default the link counts only the refreshes nearest a steady 1/60 s clock
+ DM_LOADHASH	diagnostic	`=1` logs an address-independent SHA-256 per module after loading
+ DM_LONGFRAME	diagnostic	`0` turns off the long-frame log (on by default), a line for a frame over 20 ms or with GPU time over 16.7 ms that is clearly above recent frames
++DM_MAC_RESTORE_DIR	path	Private per-run restore request folder, created and replaced by the Mac launcher; the game stages a checked backup here and the launcher restores it only after the host exits; not a player setting
+ DM_MEASURE_LOCK	path	`=<file>`: `scripts/regress.py`'s default `--lock`, the measuring lock `scripts/bench.py --lock` shares: held only while a game runs, and the harness's shader builds pause while another process holds it
+ DM_MEMSTAT	diagnostic	`=<tsv>` writes one line per second of memory accounting: footprint, Metal allocation and resident and charged memory by region class (guest, code, malloc, gpu, …)
+ DM_MEMSTAT_DUMP	diagnostic	`=<seconds>`: with `DM_MEMSTAT`, at that second writes every VM region of 1 MiB or more to `<tsv>.regions`
+diff --git a/docs/frontends.md b/docs/frontends.md
+index 0b9b7d68..5dffc112 100644
+--- a/docs/frontends.md
++++ b/docs/frontends.md
+@@ -78,6 +78,8 @@ Each app keeps the player's choices in its own preferences domain, its bundle ID
+ - **`DM_SAVED_CHOICES=0`** (in the environment or an `env.txt`) starts with the tested defaults and leaves the saved choices as they are. **`DM_LAUNCHER=0`** only skips the settings screen (the iPhone's, or a Mac app's window): the saved choices still apply.
+ - **A sandboxed front end** cannot write another app's preferences domain; this store is for front ends outside the App Sandbox, as NX2Apple is.
+ 
++The Mac [in-game menus](playing.md#mac-menus) use this same store for Console Mode and supported Frame Rate/Render Scale changes. They respect the same offered values, defaults and explicit launch overrides; with `DM_SAVED_CHOICES=0` they change only the running session. Rebuild the host and repack the launcher to add these menus to an existing app; its translated shader libraries are unchanged.
++
+ ### The cloud saves folder
+ 
+ The folder a Mac app's save is synced through ([Cloud saves](settings.md#cloud-saves)) is not a row of the settings list, since a folder is none of its kinds. It has a key of its own in the same store: `cloudSaves.folder`, a string with the folder's absolute path (`defaults write org.nxnative.<title ID> cloudSaves.folder "$HOME/Library/Mobile Documents/com~apple~CloudDocs/My Saves"`). Remove the key, or write an empty string, to turn cloud saves off. The app's settings window shows and changes the same key, so the player sees the folder a front end chose.
+diff --git a/docs/playing.md b/docs/playing.md
+index 54af057d..503779a0 100644
+--- a/docs/playing.md
++++ b/docs/playing.md
+@@ -2,6 +2,23 @@
+ 
+ How to build and install a game: [README](../README.md#how-to-play).
+ 
++## Mac menus
++
++Inside a running Mac game:
++
++- **File** opens the effective save folder (⇧⌘S), reveals the current log (⇧⌘L), and exports (⇧⌘E) or restores a save backup. For NVN games, **Take Screenshot** (⌘S or F12) saves the next frame to `~/Pictures/nxnative/<title ID>/`.
++- **Game → Console Mode** changes between Docked and Handheld. **Frame Rate** and **Render Scale** appear only when this build offers them and the running game has their runtime support. The menu choices, ranges and defaults come from the same list as the launch window; render scale stays within that build's supported range. These settings apply while playing and use the shared saved choices. A launch environment or `env.txt` override disables a setting. With `DM_SAVED_CHOICES=0`, changes last for this run only.
++- **Audio** offers a volume slider from 0% to 100%, Mute Audio (⌥⌘M), and Mute When Unfocused. These are session choices; returning from the background does not undo an explicit mute or change the volume.
++- **View → Window Scale** (⌘1–4) chooses 1×, 1.5×, 2× or 3× a 1280×720 picture in display pixels, fitting within the screen. This changes the window's size, not the game's render resolution. The presets are disabled in fullscreen.
++- Enable **Performance HUD** in the startup settings to get Apple's **Metal HUD** menu, which controls the overlay while playing.
++- The app menu provides About and the standard Hide actions. **Window** provides Minimize (⌘M), Zoom, Full Screen (⌃⌘F) and Bring All to Front. The existing Cheats menu keeps its actions.
++
++Backups are `.dmsync` files, using the same checked format as cloud saves. They include the committed normal and device saves and their guest-name metadata. Export leaves an existing archive intact if it fails. Restore checks the archive and title ID first, then asks to close the game. After the game exits, the launcher keeps the current save in a sibling `save.before-restore-…` recovery folder and replaces the save directories. Start the game again after the result dialog. A damaged, empty or different game's backup is refused. A restore is cancelled if the current save could not be sent to an enabled cloud folder; a restored save is sent there too.
++
++Restore is available only in a packaged app supervised by the current launcher. A second app instance using the same save folder is refused. Direct developer runs of `dmhost` must be stopped before restoring that save from an app.
++
++## iPhone and iPad
++
+ - **Settings:** a screen before the game starts sets frame rate, resolution, docked or handheld mode, language, rumble and more. Tap **Play**; your choices are remembered. What each one does: [Settings](settings.md).
+ - **Saves and logs** are in the Files app, under the game's name: `save/` and `log.txt` (the previous run is `log.prev.txt`). When something goes wrong, send `log.txt`.
+ - **Reinstalling:** some sideloading tools give a reinstalled app a new data folder. Copy `save/` and `pso_user.tsv` over from the old one to keep your progress.
+diff --git a/docs/reference/packing.md b/docs/reference/packing.md
+index eab61037..cdf3905d 100644
+--- a/docs/reference/packing.md
++++ b/docs/reference/packing.md
+@@ -1,5 +1,14 @@
+ # Packing
+ 
++## Mac game actions
++
++### In-game menus use the launcher's choices and committed saves
++
++- **Symptom:** a Mac app offers Console mode before Play, but no Docked/Handheld switch while the game runs. The earlier menu contribution in [PR #104](https://github.com/seedds/nxnative/pull/104) also predates the shared launcher, save paths and transactional saves.
++- **Cause:** startup settings belong to the launcher and its validated per-game store; the running host owns operation mode, audio and committed saves. A separate menu preference store or an archive restored over an active guest would disagree with those owners.
++- **Fix:** the native menus from [PR #921](https://github.com/seedds/nxnative/pull/921) use `launcher.json` for offered console-mode, frame-rate and render-scale choices, the existing preference keys, default removal and launch-override precedence. Mode changes use `dm_set_opmode`; supported frame-rate/render-scale changes update the runtime page atomically. Volume and mute preserve audio consumption and lifecycle suspension. Screenshots use NVN's existing queue. Manual backup export clones committed normal/device saves into the checked `.dmsync` format; restore validates a staged copy, waits for the host to exit, retains a recovery copy and coordinates the existing save-folder lease and cloud synchronization. The game and startup windows disable automatic tabbing.
++- **Found on:** [Metroid Dread](../../dm/games/010093801237C000/README.md#found-on-this-game), whose opening/title menu checks were reported by PR #921's author. That report is not a new gameplay check of this integration.
++
+ ## Game packages
+ 
+ ### PFS0 file-name table missing its final NUL
+diff --git a/docs/settings.md b/docs/settings.md
+index 95ef082f..4e255231 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -41,6 +41,8 @@ Hades II goes up to 300 %: it renders its whole picture, the HUD and text includ
+ 
+ **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.
+ 
++On a Mac, **Game → Console Mode → Docked / Handheld** changes it while the game runs and remembers the choice for the next launch. The checked item is the running mode. A mode fixed by the launch environment or `env.txt` is disabled in the menu. On iPhone and iPad, use the [in-game menu](#in-game-menu).
++
+ ### Upscaling
+ 
+ A game that renders below the screen's resolution is scaled up to the screen. **Standard**, the default, scales smoothly; **MetalFX** uses Apple's MetalFX upscaler, which sharpens edges and text as it scales.
+-- 
+2.54.0 (Apple Git-157)
+
